@@ -1,11 +1,221 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <link rel="stylesheet" href="styles.css">
-<title>title</title>
+    <title>Big Box Game</title>
+    <style>
+        body { margin: 0; background: #222; }
+        #three-canvas { display: block; margin: 0 auto; background: #222; }
+        #instructions {
+            color: #fff;
+            text-align: center;
+            font-family: Arial, sans-serif;
+            margin-top: 20px;
+        }
+    </style>
 </head>
 <body>
-    <header></header>
-<aside id="a">&</aside>
+  <div id="instructions">
+    <h2>Big Box Game</h2>
+    <p>Use W/A/S/D to walk, Space to jump.<br>Click the canvas to look around.<br>The camera follows the player.</p>
+  </div>
+    <canvas id="three-canvas"></canvas>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.153.0/build/three.min.js"></script>
+    <script>
+    // Simple 3D game: player in a big box, walk, jump, camera follows, portals
+    const canvas = document.getElementById('three-canvas');
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight * 0.8;
+    const renderer = new THREE.WebGLRenderer({ canvas });
+    renderer.setSize(canvas.width, canvas.height);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color('#222');
+
+    const camera = new THREE.PerspectiveCamera(75, canvas.width/canvas.height, 0.1, 1000);
+
+    // Lighting
+    const light = new THREE.DirectionalLight(0xffffff, 1);
+    light.position.set(20, 40, 20);
+    scene.add(light);
+
+    // Big box (walls, floor, ceiling)
+    const boxSize = 40;
+    const wallMat = new THREE.MeshLambertMaterial({ color: 0x444444, side: THREE.BackSide });
+    const boxGeo = new THREE.BoxGeometry(boxSize, boxSize, boxSize);
+    const boxMesh = new THREE.Mesh(boxGeo, wallMat);
+    boxMesh.position.set(boxSize/2, boxSize/2, boxSize/2);
+    scene.add(boxMesh);
+
+    // Player
+    const playerSize = 2;
+    const playerGeo = new THREE.BoxGeometry(playerSize, playerSize, playerSize);
+    const playerMat = new THREE.MeshLambertMaterial({ color: 0xff3333 });
+    const player = new THREE.Mesh(playerGeo, playerMat);
+    player.position.set(boxSize/2, playerSize/2, boxSize/2);
+    scene.add(player);
+
+  // Portals
+  let portal1 = null, portal2 = null;
+  let portal1Pos = null, portal2Pos = null;
+  const portalGeo = new THREE.CylinderGeometry(1, 1, 0.2, 32);
+  // Render targets for portal views
+  const portalRT1 = new THREE.WebGLRenderTarget(128, 128);
+  const portalRT2 = new THREE.WebGLRenderTarget(128, 128);
+  const portalMat1 = new THREE.MeshBasicMaterial({ map: portalRT2.texture });
+  const portalMat2 = new THREE.MeshBasicMaterial({ map: portalRT1.texture });
+
+    // Controls
+    const keys = {};
+    document.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+    document.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+
+    // Mouse look
+    let yaw = 0, pitch = 0;
+    let isPointerLocked = false;
+    canvas.requestPointerLock = canvas.requestPointerLock || canvas.mozRequestPointerLock;
+    document.exitPointerLock = document.exitPointerLock || document.mozExitPointerLock;
+    canvas.onclick = () => canvas.requestPointerLock();
+    document.addEventListener('pointerlockchange', lockChange, false);
+    document.addEventListener('mozpointerlockchange', lockChange, false);
+    function lockChange() {
+      isPointerLocked = document.pointerLockElement === canvas || document.mozPointerLockElement === canvas;
+    }
+    document.addEventListener('mousemove', function(e) {
+      if (!isPointerLocked) return;
+      yaw -= e.movementX * 0.002;
+      pitch -= e.movementY * 0.002;
+      pitch = Math.max(-Math.PI/2, Math.min(Math.PI/2, pitch));
+    });
+
+    // Jump logic
+    let velocityY = 0;
+    let isOnGround = true;
+
+    // Portal placement
+    document.addEventListener('keydown', function(e) {
+      if (!isPointerLocked) return;
+      if (e.key.toLowerCase() === 'q') {
+        // Place portal 1 in front of player
+        if (portal1) scene.remove(portal1);
+        const lookDir = new THREE.Vector3(Math.sin(yaw), Math.sin(pitch), Math.cos(yaw)).normalize();
+        portal1Pos = player.position.clone().add(lookDir.multiplyScalar(4));
+  portal1 = new THREE.Mesh(portalGeo, portalMat1);
+  portal1.position.copy(portal1Pos);
+  // Orient portal to match player orientation
+  portal1.quaternion.copy(player.quaternion);
+  scene.add(portal1);
+      }
+      if (e.key.toLowerCase() === 'e') {
+        // Place portal 2 in front of player
+        if (portal2) scene.remove(portal2);
+        const lookDir = new THREE.Vector3(Math.sin(yaw), Math.sin(pitch), Math.cos(yaw)).normalize();
+        portal2Pos = player.position.clone().add(lookDir.multiplyScalar(4));
+  portal2 = new THREE.Mesh(portalGeo, portalMat2);
+  portal2.position.copy(portal2Pos);
+  // Orient portal to match player orientation
+  portal2.quaternion.copy(player.quaternion);
+  scene.add(portal2);
+      }
+    });
+
+    function updateCamera() {
+      // Camera follows player and looks where mouse points
+      const camDist = 8;
+      const camHeight = 4;
+      const lookDir = new THREE.Vector3(Math.sin(yaw), Math.sin(pitch), Math.cos(yaw)).normalize();
+      camera.position.x = player.position.x - lookDir.x * camDist;
+      camera.position.y = player.position.y + camHeight - lookDir.y * camDist;
+      camera.position.z = player.position.z - lookDir.z * camDist;
+      camera.lookAt(player.position.x + lookDir.x * 2, player.position.y + lookDir.y * 2, player.position.z + lookDir.z * 2);
+    }
+
+    function checkPortalTeleport() {
+      if (portal1 && portal2 && portal1Pos && portal2Pos) {
+        // If player is close to portal1, teleport to portal2
+        if (player.position.distanceTo(portal1.position) < 2) {
+          player.position.copy(portal2.position);
+          player.position.y += 2; // Offset to avoid instant re-teleport
+        }
+        // If player is close to portal2, teleport to portal1
+        if (player.position.distanceTo(portal2.position) < 2) {
+          player.position.copy(portal1.position);
+          player.position.y += 2;
+        }
+      }
+    }
+
+    function renderPortalView(portalFrom, portalTo, renderTarget) {
+      if (!portalFrom || !portalTo) return;
+      // Hide the portal being rendered to avoid recursive view
+      portalFrom.visible = false;
+      // Set up a virtual camera at portalTo, looking out
+      const portalCam = new THREE.PerspectiveCamera(75, 1, 0.1, 1000);
+      portalCam.position.copy(portalTo.position);
+      // Look in the same direction as portalFrom
+      portalCam.rotation.copy(portalFrom.rotation);
+      portalCam.updateMatrixWorld();
+      renderer.setRenderTarget(renderTarget);
+      renderer.render(scene, portalCam);
+      renderer.setRenderTarget(null);
+      portalFrom.visible = true;
+    }
+
+    function animate() {
+      // Player movement
+      const moveSpeed = 0.2 * playerSize;
+      if (keys['w']) {
+        player.position.x += Math.sin(yaw) * moveSpeed;
+        player.position.z += Math.cos(yaw) * moveSpeed;
+      }
+      if (keys['s']) {
+        player.position.x -= Math.sin(yaw) * moveSpeed;
+        player.position.z -= Math.cos(yaw) * moveSpeed;
+      }
+      if (keys['a']) {
+        player.position.x += Math.sin(yaw + Math.PI/2) * moveSpeed;
+        player.position.z += Math.cos(yaw + Math.PI/2) * moveSpeed;
+        // Turn player left
+        player.rotation.y = yaw + Math.PI/2;
+      }
+      if (keys['d']) {
+        player.position.x += Math.sin(yaw - Math.PI/2) * moveSpeed;
+        player.position.z += Math.cos(yaw - Math.PI/2) * moveSpeed;
+        // Turn player right
+        player.rotation.y = yaw - Math.PI/2;
+      }
+      // Jump
+      if (keys[' ']) {
+        if (isOnGround) {
+          velocityY = 0.25 * playerSize;
+          isOnGround = false;
+        }
+      }
+      // Gravity
+      velocityY -= 0.01 * playerSize;
+      player.position.y += velocityY;
+      // Floor collision
+      if (player.position.y <= playerSize/2) {
+        player.position.y = playerSize/2;
+        velocityY = 0;
+        isOnGround = true;
+      }
+      // Ceiling collision
+      if (player.position.y >= boxSize - playerSize/2) {
+        player.position.y = boxSize - playerSize/2;
+        velocityY = 0;
+      }
+      // Wall collision
+      player.position.x = Math.max(playerSize/2, Math.min(player.position.x, boxSize - playerSize/2));
+      player.position.z = Math.max(playerSize/2, Math.min(player.position.z, boxSize - playerSize/2));
+      checkPortalTeleport();
+      // Render portal views
+      renderPortalView(portal1, portal2, portalRT1);
+      renderPortalView(portal2, portal1, portalRT2);
+      updateCamera();
+      renderer.render(scene, camera);
+      requestAnimationFrame(animate);
+    }
+    animate();
+    </script>
 </body>
 </html>
