@@ -33,18 +33,55 @@
 
     const camera = new THREE.PerspectiveCamera(75, canvas.width/canvas.height, 0.1, 1000);
 
-    // Lighting
-    const light = new THREE.DirectionalLight(0xffffff, 1);
-    light.position.set(20, 40, 20);
-    scene.add(light);
-
     // Big box (walls, floor, ceiling)
     const boxSize = 40;
+    // Lighting
+    const light = new THREE.DirectionalLight(0xffffff, 0.5);
+    light.position.set(20, 40, 20);
+    scene.add(light);
+    // Soft point light in the center
+    const centerLight = new THREE.PointLight(0xfff8e1, 0.8, 60);
+    centerLight.position.set(boxSize/2, boxSize/2, boxSize/2);
+    scene.add(centerLight);
+
     const wallMat = new THREE.MeshLambertMaterial({ color: 0x444444, side: THREE.BackSide });
     const boxGeo = new THREE.BoxGeometry(boxSize, boxSize, boxSize);
     const boxMesh = new THREE.Mesh(boxGeo, wallMat);
     boxMesh.position.set(boxSize/2, boxSize/2, boxSize/2);
     scene.add(boxMesh);
+
+    // Portalable walls (thin panels inside the box)
+    const portalableWalls = [];
+    function addPortalableWall(x, y, z, rotY=0, rotX=0) {
+      const wallGeo = new THREE.BoxGeometry(10, 10, 0.5);
+      const wallMat = new THREE.MeshLambertMaterial({ color: 0x90caf9 });
+      const wall = new THREE.Mesh(wallGeo, wallMat);
+      wall.position.set(x, y, z);
+      wall.rotation.y = rotY;
+      wall.rotation.x = rotX;
+      scene.add(wall);
+      portalableWalls.push(wall);
+    }
+    addPortalableWall(boxSize/2, 5, 5); // front
+    addPortalableWall(boxSize/2, 5, boxSize-5); // back
+    addPortalableWall(5, 5, boxSize/2, Math.PI/2); // left
+    addPortalableWall(boxSize-5, 5, boxSize/2, Math.PI/2); // right
+    addPortalableWall(boxSize/2, 15, boxSize/2); // center
+    // Portalable ceiling and floor
+    function addPortalableFloorCeiling(y) {
+      const geo = new THREE.BoxGeometry(10, 0.5, 10);
+      const mat = new THREE.MeshLambertMaterial({ color: 0x90caf9 });
+      for (let i = 0; i < 3; i++) {
+        for (let j = 0; j < 3; j++) {
+          const panel = new THREE.Mesh(geo, mat);
+          panel.position.set(10 + i*10, y, 10 + j*10);
+          scene.add(panel);
+          portalableWalls.push(panel);
+        }
+      }
+    }
+    addPortalableFloorCeiling(1); // floor
+    addPortalableFloorCeiling(boxSize-1); // ceiling
 
     // Player
     const playerSize = 2;
@@ -57,6 +94,7 @@
   // Portals
   let portal1 = null, portal2 = null;
   let portal1Pos = null, portal2Pos = null;
+  let portal1Normal = null, portal2Normal = null;
   const portalGeo = new THREE.CylinderGeometry(1, 1, 0.2, 32);
   // Render targets for portal views
   const portalRT1 = new THREE.WebGLRenderTarget(128, 128);
@@ -84,37 +122,71 @@
       if (!isPointerLocked) return;
       yaw -= e.movementX * 0.002;
       pitch -= e.movementY * 0.002;
-      pitch = Math.max(-Math.PI/2, Math.min(Math.PI/2, pitch));
+  pitch = Math.max(-Math.PI*0.95, Math.min(Math.PI*0.95, pitch));
     });
 
     // Jump logic
     let velocityY = 0;
     let isOnGround = true;
 
-    // Portal placement
-    document.addEventListener('keydown', function(e) {
+    // Portal gun: shoot portals with left/right click
+    canvas.addEventListener('mousedown', function(e) {
       if (!isPointerLocked) return;
-      if (e.key.toLowerCase() === 'q') {
-        // Place portal 1 in front of player
-        if (portal1) scene.remove(portal1);
-        const lookDir = new THREE.Vector3(Math.sin(yaw), Math.sin(pitch), Math.cos(yaw)).normalize();
-        portal1Pos = player.position.clone().add(lookDir.multiplyScalar(4));
-  portal1 = new THREE.Mesh(portalGeo, portalMat1);
-  portal1.position.copy(portal1Pos);
-  // Orient portal to match player orientation
-  portal1.quaternion.copy(player.quaternion);
-  scene.add(portal1);
-      }
-      if (e.key.toLowerCase() === 'e') {
-        // Place portal 2 in front of player
-        if (portal2) scene.remove(portal2);
-        const lookDir = new THREE.Vector3(Math.sin(yaw), Math.sin(pitch), Math.cos(yaw)).normalize();
-        portal2Pos = player.position.clone().add(lookDir.multiplyScalar(4));
-  portal2 = new THREE.Mesh(portalGeo, portalMat2);
-  portal2.position.copy(portal2Pos);
-  // Orient portal to match player orientation
-  portal2.quaternion.copy(player.quaternion);
-  scene.add(portal2);
+      if (e.button !== 0 && e.button !== 2) return;
+      // Shoot ray from player in look direction
+      const lookDir = new THREE.Vector3(Math.sin(yaw), Math.sin(pitch), Math.cos(yaw)).normalize();
+      const raycaster = new THREE.Raycaster(player.position.clone().add(new THREE.Vector3(0, playerSize/2, 0)), lookDir);
+      const intersects = raycaster.intersectObjects(portalableWalls);
+      if (intersects.length > 0) {
+        const hit = intersects[0];
+        const hitPos = hit.point;
+        const hitNormal = hit.face.normal.clone();
+        // Place portal at hitPos, oriented to hitNormal
+        function orientPortal(portal, normal) {
+          // Default portal faces +Z, so align +Z to normal
+          const portalForward = new THREE.Vector3(0, 0, 1);
+          const targetNormal = normal.clone().normalize();
+          if (Math.abs(targetNormal.y) > 0.9) {
+            // Floor or ceiling: align +Y to normal
+            const portalUp = new THREE.Vector3(0, 1, 0);
+            portal.quaternion.setFromUnitVectors(portalUp, targetNormal);
+          } else {
+            // Wall: align portal so +Z is flush with wall normal, +Y is up
+            const wallNormal = targetNormal;
+            // Project world up onto the wall to get the best up direction
+            let up = new THREE.Vector3(0, 1, 0);
+            // If wall is vertical, projected up is world up
+            if (Math.abs(wallNormal.y) < 0.01) {
+              up = new THREE.Vector3(0, 1, 0);
+            } else {
+              // Otherwise, project world up onto the wall
+              up = up.sub(wallNormal.clone().multiplyScalar(up.dot(wallNormal))).normalize();
+            }
+            // Right vector
+            const right = up.clone().cross(wallNormal).normalize();
+            // Build rotation matrix
+            const m = new THREE.Matrix4();
+            m.makeBasis(right, up, wallNormal);
+            portal.setRotationFromMatrix(m);
+          }
+        }
+        if (e.button === 0) { // left click: portal 1
+          if (portal1) scene.remove(portal1);
+          portal1Pos = hitPos;
+          portal1Normal = hitNormal;
+          portal1 = new THREE.Mesh(portalGeo, portalMat1);
+          portal1.position.copy(portal1Pos);
+          orientPortal(portal1, hitNormal);
+          scene.add(portal1);
+        } else if (e.button === 2) { // right click: portal 2
+          if (portal2) scene.remove(portal2);
+          portal2Pos = hitPos;
+          portal2Normal = hitNormal;
+          portal2 = new THREE.Mesh(portalGeo, portalMat2);
+          portal2.position.copy(portal2Pos);
+          orientPortal(portal2, hitNormal);
+          scene.add(portal2);
+        }
       }
     });
 
@@ -129,17 +201,41 @@
       camera.lookAt(player.position.x + lookDir.x * 2, player.position.y + lookDir.y * 2, player.position.z + lookDir.z * 2);
     }
 
+    let portalCooldown = 0;
     function checkPortalTeleport() {
+      if (portalCooldown > 0) {
+        portalCooldown--;
+        return;
+      }
       if (portal1 && portal2 && portal1Pos && portal2Pos) {
+        // Helper to teleport and match orientation
+        function teleportPlayer(srcPortal, dstPortal, dstNormal) {
+          // Move player to the center of destination portal, offset in normal direction
+          const offset = dstNormal.clone().multiplyScalar(1.2);
+          player.position.copy(dstPortal.position).add(offset);
+          // Transform facing direction (yaw/pitch) to match portal orientation
+          // Get src and dst portal normals
+          const srcNormal = srcPortal === portal1 ? portal1Normal : portal2Normal;
+          // Calculate new yaw/pitch based on normal
+          // For simplicity, set yaw to match dstNormal's horizontal angle
+          yaw = Math.atan2(dstNormal.x, dstNormal.z);
+          // For vertical portals, adjust pitch
+          if (Math.abs(dstNormal.y) > 0.9) {
+            pitch = dstNormal.y > 0 ? -Math.PI/2 : Math.PI/2;
+          } else {
+            pitch = 0;
+          }
+          // Optionally, transform velocity direction (if jumping through)
+          // Not implemented: advanced velocity transform
+          portalCooldown = 30; // ~0.5s cooldown
+        }
         // If player is close to portal1, teleport to portal2
         if (player.position.distanceTo(portal1.position) < 2) {
-          player.position.copy(portal2.position);
-          player.position.y += 2; // Offset to avoid instant re-teleport
+          teleportPlayer(portal1, portal2, portal2Normal);
         }
         // If player is close to portal2, teleport to portal1
         if (player.position.distanceTo(portal2.position) < 2) {
-          player.position.copy(portal1.position);
-          player.position.y += 2;
+          teleportPlayer(portal2, portal1, portal1Normal);
         }
       }
     }
@@ -174,14 +270,10 @@
       if (keys['a']) {
         player.position.x += Math.sin(yaw + Math.PI/2) * moveSpeed;
         player.position.z += Math.cos(yaw + Math.PI/2) * moveSpeed;
-        // Turn player left
-        player.rotation.y = yaw + Math.PI/2;
       }
       if (keys['d']) {
         player.position.x += Math.sin(yaw - Math.PI/2) * moveSpeed;
         player.position.z += Math.cos(yaw - Math.PI/2) * moveSpeed;
-        // Turn player right
-        player.rotation.y = yaw - Math.PI/2;
       }
       // Jump
       if (keys[' ']) {
